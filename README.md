@@ -1,10 +1,10 @@
 # S-UI
 **An Advanced Web Panel • Built on SagerNet/Sing-Box**
 
-![](https://img.shields.io/github/v/release/alireza0/s-ui.svg)
+![](https://img.shields.io/github/v/release/alovvvv/s-ui.svg)
 ![S-UI Docker pull](https://img.shields.io/docker/pulls/alireza7/s-ui.svg)
-[![Go Report Card](https://goreportcard.com/badge/github.com/alireza0/s-ui)](https://goreportcard.com/report/github.com/alireza0/s-ui)
-[![Downloads](https://img.shields.io/github/downloads/alireza0/s-ui/total.svg)](https://img.shields.io/github/downloads/alireza0/s-ui/total.svg)
+[![Go Report Card](https://goreportcard.com/badge/github.com/alovvvv/s-ui)](https://goreportcard.com/report/github.com/alovvvv/s-ui)
+[![Downloads](https://img.shields.io/github/downloads/alovvvv/s-ui/total.svg)](https://img.shields.io/github/downloads/alovvvv/s-ui/total.svg)
 [![License](https://img.shields.io/badge/license-GPL%20V3-blue.svg?longCache=true)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 
 > **Disclaimer:** This project is only for personal learning and communication, please do not use it for illegal purposes, please do not use it in a production environment
@@ -40,13 +40,13 @@
 
 ## Screenshots
 
-!["Main"](https://github.com/alireza0/s-ui-frontend/raw/main/media/main.png)
+!["Main"](https://github.com/alovvvv/s-ui-frontend/raw/main/media/main.png)
 
-[Other UI Screenshots](https://github.com/alireza0/s-ui-frontend/blob/main/screenshots.md)
+[Other UI Screenshots](https://github.com/alovvvv/s-ui-frontend/blob/main/screenshots.md)
 
 ## API Documentation
 
-[API-Documentation Wiki](https://github.com/alireza0/s-ui/wiki/API-Documentation)
+[API-Documentation Wiki](https://github.com/alovvvv/s-ui/wiki/API-Documentation)
 
 ## Default Installation Information
 - Panel Port: 2095
@@ -59,11 +59,11 @@
 
 ### Linux/macOS
 ```sh
-bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/master/install.sh)
+bash <(curl -Ls https://raw.githubusercontent.com/alovvvv/s-ui/master/install.sh)
 ```
 
 ### Windows
-1. Download the latest Windows release from [GitHub Releases](https://github.com/alireza0/s-ui/releases/latest)
+1. Download the latest Windows release from [GitHub Releases](https://github.com/alovvvv/s-ui/releases/latest)
 2. Extract the ZIP file
 3. Run `install-windows.bat` as Administrator
 4. Follow the installation wizard
@@ -73,14 +73,14 @@ bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/master/install.s
 **Step 1:** To install your desired legacy version, add the version to the end of the installation command. e.g., ver `1.0.0`:
 
 ```sh
-VERSION=1.0.0 && bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui/$VERSION/install.sh) $VERSION
+VERSION=1.0.0 && bash <(curl -Ls https://raw.githubusercontent.com/alovvvv/s-ui/$VERSION/install.sh) $VERSION
 ```
 
 ## Manual installation
 
 ### Linux/macOS
-1. Get the latest version of S-UI based on your OS/Architecture from GitHub: [https://github.com/alireza0/s-ui/releases/latest](https://github.com/alireza0/s-ui/releases/latest)
-2. **OPTIONAL** Get the latest version of `s-ui.sh` [https://raw.githubusercontent.com/alireza0/s-ui/master/s-ui.sh](https://raw.githubusercontent.com/alireza0/s-ui/master/s-ui.sh)
+1. Get the latest version of S-UI based on your OS/Architecture from GitHub: [https://github.com/alovvvv/s-ui/releases/latest](https://github.com/alovvvv/s-ui/releases/latest)
+2. **OPTIONAL** Get the latest version of `s-ui.sh` [https://raw.githubusercontent.com/alovvvv/s-ui/master/s-ui.sh](https://raw.githubusercontent.com/alovvvv/s-ui/master/s-ui.sh)
 3. **OPTIONAL** Copy `s-ui.sh` to /usr/bin/ and run `chmod +x /usr/bin/s-ui`.
 4. Extract s-ui tar.gz file to a directory of your choice and navigate to the directory where you extracted the tar.gz file.
 5. Copy *.service files to /etc/systemd/system/ and run `systemctl daemon-reload`.
@@ -88,7 +88,7 @@ VERSION=1.0.0 && bash <(curl -Ls https://raw.githubusercontent.com/alireza0/s-ui
 7. Start sing-box service using `systemctl enable sing-box --now`
 
 ### Windows
-1. Get the latest Windows version from GitHub: [https://github.com/alireza0/s-ui/releases/latest](https://github.com/alireza0/s-ui/releases/latest)
+1. Get the latest Windows version from GitHub: [https://github.com/alovvvv/s-ui/releases/latest](https://github.com/alovvvv/s-ui/releases/latest)
 2. Download the appropriate Windows package (e.g., `s-ui-windows-amd64.zip`)
 3. Extract the ZIP file to a directory of your choice
 4. Run `install-windows.bat` as Administrator
@@ -128,7 +128,7 @@ curl -fsSL https://get.docker.com | sh
 
 ```shell
 mkdir s-ui && cd s-ui
-wget -q https://raw.githubusercontent.com/alireza0/s-ui/master/docker-compose.yml
+wget -q https://raw.githubusercontent.com/alovvvv/s-ui/master/docker-compose.yml
 docker compose up -d
 ```
 
@@ -147,7 +147,7 @@ docker run -itd \
 > Build your own image
 
 ```shell
-git clone https://github.com/alireza0/s-ui
+git clone https://github.com/alovvvv/s-ui
 git submodule update --init --recursive
 docker build -t s-ui .
 ```
@@ -167,7 +167,7 @@ docker build -t s-ui .
 ### Clone the repository
 ```shell
 # clone repository
-git clone https://github.com/alireza0/s-ui
+git clone https://github.com/alovvvv/s-ui
 # clone submodules
 git submodule update --init --recursive
 ```
@@ -175,7 +175,7 @@ git submodule update --init --recursive
 
 ### - Frontend
 
-Visit [s-ui-frontend](https://github.com/alireza0/s-ui-frontend) for frontend code
+Visit [s-ui-frontend](https://github.com/alovvvv/s-ui-frontend) for frontend code
 
 ### - Backend
 > Please build frontend once before!
@@ -256,4 +256,4 @@ certbot certonly --standalone --register-unsafely-without-email --non-interactiv
 </details>
 
 ## Stargazers over Time
-[![Stargazers over time](https://starchart.cc/alireza0/s-ui.svg)](https://starchart.cc/alireza0/s-ui)
+[![Stargazers over time](https://starchart.cc/alovvvv/s-ui.svg)](https://starchart.cc/alovvvv/s-ui)
