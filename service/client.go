@@ -17,6 +17,13 @@ import (
 
 type ClientService struct{}
 
+const (
+	resetTypePeriodic = "periodic"
+	resetTypeDaily    = "daily"
+	resetTypeWeekly   = "weekly"
+	resetTypeMonthly  = "monthly"
+)
+
 func (s *ClientService) Get(id string) (*[]model.Client, error) {
 	if id == "" {
 		return s.GetAll()
@@ -47,6 +54,125 @@ func (s *ClientService) GetAll() (*[]model.Client, error) {
 	return &clients, nil
 }
 
+func normalizeResetType(resetType string) string {
+	switch resetType {
+	case "", resetTypePeriodic:
+		return resetTypePeriodic
+	case resetTypeDaily, resetTypeWeekly, resetTypeMonthly:
+		return resetType
+	default:
+		return resetTypePeriodic
+	}
+}
+
+func normalizeClientReset(client *model.Client) {
+	client.ResetType = normalizeResetType(client.ResetType)
+
+	if client.ResetDays < 0 {
+		client.ResetDays = 0
+	}
+	if client.ResetHour < 0 {
+		client.ResetHour = 0
+	} else if client.ResetHour > 23 {
+		client.ResetHour = 23
+	}
+	if client.ResetWeekDay < 0 {
+		client.ResetWeekDay = 0
+	} else if client.ResetWeekDay > 6 {
+		client.ResetWeekDay = 6
+	}
+	if client.ResetMonthDay < 1 {
+		client.ResetMonthDay = 1
+	} else if client.ResetMonthDay > 31 {
+		client.ResetMonthDay = 31
+	}
+
+	if !client.AutoReset {
+		client.ResetType = resetTypePeriodic
+		client.NextReset = 0
+		return
+	}
+
+	if client.ResetType == resetTypePeriodic && client.ResetDays < 1 {
+		client.ResetDays = 1
+	}
+}
+
+func nextMonthlyReset(base time.Time, monthDay int, hour int) time.Time {
+	year, month, _ := base.Date()
+	loc := base.Location()
+	for i := 0; i < 24; i++ {
+		targetMonth := month + time.Month(i)
+		firstOfMonth := time.Date(year, targetMonth, 1, hour, 0, 0, 0, loc)
+		lastDay := firstOfMonth.AddDate(0, 1, -1).Day()
+		day := monthDay
+		if day > lastDay {
+			day = lastDay
+		}
+		candidate := time.Date(firstOfMonth.Year(), firstOfMonth.Month(), day, hour, 0, 0, 0, loc)
+		if candidate.After(base) {
+			return candidate
+		}
+	}
+	return base
+}
+
+func nextScheduledReset(client *model.Client, dt int64) int64 {
+	base := time.Unix(dt, 0)
+	switch normalizeResetType(client.ResetType) {
+	case resetTypeDaily:
+		candidate := time.Date(base.Year(), base.Month(), base.Day(), client.ResetHour, 0, 0, 0, base.Location())
+		if !candidate.After(base) {
+			candidate = candidate.AddDate(0, 0, 1)
+		}
+		return candidate.Unix()
+	case resetTypeWeekly:
+		currentWeekDay := int(base.Weekday())
+		daysAhead := (client.ResetWeekDay - currentWeekDay + 7) % 7
+		candidate := time.Date(base.Year(), base.Month(), base.Day(), client.ResetHour, 0, 0, 0, base.Location()).AddDate(0, 0, daysAhead)
+		if !candidate.After(base) {
+			candidate = candidate.AddDate(0, 0, 7)
+		}
+		return candidate.Unix()
+	case resetTypeMonthly:
+		return nextMonthlyReset(base, client.ResetMonthDay, client.ResetHour).Unix()
+	default:
+		if client.ResetDays < 1 {
+			client.ResetDays = 1
+		}
+		return dt + (int64(client.ResetDays) * 86400)
+	}
+}
+
+func resetConfigChanged(oldClient *model.Client, newClient *model.Client) bool {
+	return oldClient.DelayStart != newClient.DelayStart ||
+		oldClient.AutoReset != newClient.AutoReset ||
+		oldClient.ResetDays != newClient.ResetDays ||
+		normalizeResetType(oldClient.ResetType) != normalizeResetType(newClient.ResetType) ||
+		oldClient.ResetHour != newClient.ResetHour ||
+		oldClient.ResetWeekDay != newClient.ResetWeekDay ||
+		oldClient.ResetMonthDay != newClient.ResetMonthDay
+}
+
+func prepareClientReset(client *model.Client, oldClient *model.Client, dt int64) {
+	normalizeClientReset(client)
+
+	if !client.AutoReset {
+		return
+	}
+	if client.DelayStart {
+		client.NextReset = 0
+		return
+	}
+
+	if oldClient != nil && !resetConfigChanged(oldClient, client) && oldClient.NextReset > dt {
+		client.NextReset = oldClient.NextReset
+		return
+	}
+
+	client.NextReset = nextScheduledReset(client, dt)
+}
+
 func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, hostname string) ([]uint, error) {
 	var err error
 	var inboundIds []uint
@@ -58,6 +184,16 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, err
 		}
+		var oldClient *model.Client
+		if act == "edit" {
+			var existing model.Client
+			err = tx.Model(model.Client{}).Where("id = ?", client.Id).First(&existing).Error
+			if err != nil {
+				return nil, err
+			}
+			oldClient = &existing
+		}
+		prepareClientReset(&client, oldClient, time.Now().Unix())
 		err = s.updateLinksWithFixedInbounds(tx, []*model.Client{&client}, hostname)
 		if err != nil {
 			return nil, err
@@ -84,6 +220,10 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, err
 		}
+		now := time.Now().Unix()
+		for _, client := range clients {
+			prepareClientReset(client, nil, now)
+		}
 		err = json.Unmarshal(clients[0].Inbounds, &inboundIds)
 		if err != nil {
 			return nil, err
@@ -102,7 +242,14 @@ func (s *ClientService) Save(tx *gorm.DB, act string, data json.RawMessage, host
 		if err != nil {
 			return nil, err
 		}
+		now := time.Now().Unix()
 		for _, client := range clients {
+			var existing model.Client
+			err = tx.Model(model.Client{}).Where("id = ?", client.Id).First(&existing).Error
+			if err != nil {
+				return nil, err
+			}
+			prepareClientReset(client, &existing, now)
 			changedInboundIds, err := s.findInboundsChanges(tx, client, true)
 			if err != nil {
 				return nil, err
@@ -461,7 +608,7 @@ func (s *ClientService) ResetClients(tx *gorm.DB, dt int64) ([]uint, error) {
 		return nil, err
 	}
 	for _, client := range resetClients {
-		client.NextReset = dt + (int64(client.ResetDays) * 86400)
+		client.NextReset = nextScheduledReset(client, dt)
 		client.DelayStart = false
 		changes = append(changes, model.Changes{
 			DateTime: dt,
@@ -480,7 +627,7 @@ func (s *ClientService) ResetClients(tx *gorm.DB, dt int64) ([]uint, error) {
 		return nil, err
 	}
 	for _, client := range resetClients {
-		client.NextReset = dt + (int64(client.ResetDays) * 86400)
+		client.NextReset = nextScheduledReset(client, dt)
 		client.TotalUp += client.Up
 		client.TotalDown += client.Down
 		client.Up = 0

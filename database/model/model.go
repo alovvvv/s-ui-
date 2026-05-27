@@ -36,13 +36,17 @@ type Client struct {
 	Desc     string          `json:"desc" form:"desc"`
 	Group    string          `json:"group" form:"group"`
 
-	// Delay start and periodic reset
-	DelayStart bool  `json:"delayStart" form:"delayStart" gorm:"default:false;not null"`
-	AutoReset  bool  `json:"autoReset" form:"autoReset" gorm:"default:false;not null"`
-	ResetDays  int   `json:"resetDays" form:"resetDays" gorm:"default:0;not null"`
-	NextReset  int64 `json:"nextReset" form:"nextReset" gorm:"default:0;not null"`
-	TotalUp    int64 `json:"totalUp" form:"totalUp" gorm:"default:0;not null"`
-	TotalDown  int64 `json:"totalDown" form:"totalDown" gorm:"default:0;not null"`
+	// Delay start and reset settings
+	DelayStart    bool   `json:"delayStart" form:"delayStart" gorm:"default:false;not null"`
+	AutoReset     bool   `json:"autoReset" form:"autoReset" gorm:"default:false;not null"`
+	ResetDays     int    `json:"resetDays" form:"resetDays" gorm:"default:0;not null"`
+	ResetType     string `json:"resetType" form:"resetType" gorm:"default:'';not null"`
+	ResetHour     int    `json:"resetHour" form:"resetHour" gorm:"default:0;not null"`
+	ResetWeekDay  int    `json:"resetWeekDay" form:"resetWeekDay" gorm:"default:1;not null"`
+	ResetMonthDay int    `json:"resetMonthDay" form:"resetMonthDay" gorm:"default:1;not null"`
+	NextReset     int64  `json:"nextReset" form:"nextReset" gorm:"default:0;not null"`
+	TotalUp       int64  `json:"totalUp" form:"totalUp" gorm:"default:0;not null"`
+	TotalDown     int64  `json:"totalDown" form:"totalDown" gorm:"default:0;not null"`
 }
 
 type Stats struct {
