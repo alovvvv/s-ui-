@@ -1,0 +1,238 @@
+package util
+
+import (
+	"encoding/json"
+	"net/url"
+	"strings"
+	"testing"
+
+	"github.com/alireza0/s-ui/database/model"
+)
+
+// nastyPasswords are what an operator can legitimately type into the password
+// box. Every one of them used to produce a link that url.Parse rejected, and
+// addParams dereferenced the nil it got back -- so one client with a space in
+// their password took down link generation for the whole panel.
+var nastyPasswords = []string{
+	"plain",
+	"p ss",
+	"p%ss",
+	"pü",
+	"p#ss",
+	"p/ss",
+	"p:ss",
+	"p?ss",
+	"p@ss",
+	"p&ss=x",
+	"p\"ss",
+	"🎈",
+}
+
+func inboundFor(t *testing.T, typ string, options map[string]interface{}) *model.Inbound {
+	t.Helper()
+	if options == nil {
+		options = map[string]interface{}{}
+	}
+	options["listen_port"] = 443
+	raw, err := json.Marshal(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &model.Inbound{
+		Type:    typ,
+		Tag:     "inbound-tag",
+		Options: json.RawMessage(raw),
+		Addrs:   json.RawMessage(`[]`),
+	}
+}
+
+func clientConfigFor(t *testing.T, proto string, fields map[string]interface{}) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(map[string]interface{}{proto: fields})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
+// Every protocol that puts credentials in the userinfo, over every password a
+// user can actually have. The link has to parse back, and the credential has to
+// survive the round trip.
+func TestLinkGeneratorSurvivesAwkwardPasswords(t *testing.T) {
+	protocols := []struct {
+		typ     string
+		proto   string
+		fields  func(pass string) map[string]interface{}
+		options map[string]interface{}
+	}{
+		{"socks", "socks", func(p string) map[string]interface{} {
+			return map[string]interface{}{"username": "us er", "password": p}
+		}, nil},
+		{"http", "http", func(p string) map[string]interface{} {
+			return map[string]interface{}{"username": "us er", "password": p}
+		}, nil},
+		{"trojan", "trojan", func(p string) map[string]interface{} {
+			return map[string]interface{}{"password": p}
+		}, nil},
+		{"hysteria2", "hysteria2", func(p string) map[string]interface{} {
+			return map[string]interface{}{"password": p}
+		}, nil},
+		{"anytls", "anytls", func(p string) map[string]interface{} {
+			return map[string]interface{}{"password": p}
+		}, nil},
+		{"tuic", "tuic", func(p string) map[string]interface{} {
+			return map[string]interface{}{"uuid": "11111111-1111-1111-1111-111111111111", "password": p}
+		}, nil},
+		{"naive", "naive", func(p string) map[string]interface{} {
+			return map[string]interface{}{"username": "us er", "password": p}
+		}, nil},
+		{"shadowsocks", "shadowsocks", func(p string) map[string]interface{} {
+			return map[string]interface{}{"password": p}
+		}, map[string]interface{}{"method": "aes-128-gcm"}},
+	}
+
+	for _, p := range protocols {
+		for _, pass := range nastyPasswords {
+			t.Run(p.typ+"/"+pass, func(t *testing.T) {
+				defer func() {
+					if r := recover(); r != nil {
+						t.Fatalf("panicked generating a %s link for password %q: %v", p.typ, pass, r)
+					}
+				}()
+
+				inbound := inboundFor(t, p.typ, p.options)
+				links := LinkGenerator(clientConfigFor(t, p.proto, p.fields(pass)), inbound, "example.test", "someone")
+				if len(links) == 0 {
+					t.Fatalf("no link generated for %s", p.typ)
+				}
+				for _, link := range links {
+					if _, err := url.Parse(link); err != nil {
+						t.Errorf("generated link does not parse: %q: %v", link, err)
+					}
+				}
+			})
+		}
+	}
+}
+
+// The password has to come back out, not just survive parsing. A link that
+// parses but carries the wrong credential fails silently on the client.
+func TestUserinfoRoundTrips(t *testing.T) {
+	for _, pass := range nastyPasswords {
+		t.Run(pass, func(t *testing.T) {
+			inbound := inboundFor(t, "trojan", nil)
+			links := LinkGenerator(clientConfigFor(t, "trojan",
+				map[string]interface{}{"password": pass}), inbound, "example.test", "someone")
+			if len(links) == 0 {
+				t.Fatal("no link generated")
+			}
+			u, err := url.Parse(links[0])
+			if err != nil {
+				t.Fatalf("link does not parse: %v", err)
+			}
+			if got := u.User.Username(); got != pass {
+				t.Errorf("password round trip: got %q, want %q", got, pass)
+			}
+		})
+	}
+}
+
+// Remarks are user-controlled too, and they land in the fragment.
+func TestRemarksWithAwkwardCharacters(t *testing.T) {
+	for _, remark := range []string{"plain", "a b", "a#b", "a?b", "نام", "🎈"} {
+		t.Run(remark, func(t *testing.T) {
+			defer func() {
+				if r := recover(); r != nil {
+					t.Fatalf("panicked on remark %q: %v", remark, r)
+				}
+			}()
+			inbound := inboundFor(t, "trojan", nil)
+			links := LinkGenerator(clientConfigFor(t, "trojan",
+				map[string]interface{}{"password": "p"}), inbound, "example.test", remark)
+			if len(links) == 0 {
+				t.Fatal("no link generated")
+			}
+			u, err := url.Parse(links[0])
+			if err != nil {
+				t.Fatalf("link does not parse: %v", err)
+			}
+			if !strings.Contains(u.Fragment, remark) {
+				t.Errorf("remark %q is not in the fragment %q", remark, u.Fragment)
+			}
+		})
+	}
+}
+
+// A naive http2 link carries its credentials base64'd and unescaped, so the
+// authority has to be split at the last @, not the first.
+func TestNaiveLinkRoundTripsAwkwardCredentials(t *testing.T) {
+	for _, pass := range []string{"plain", "p@ss", "p@s@s", "p:ss", "p ss"} {
+		t.Run(pass, func(t *testing.T) {
+			inbound := inboundFor(t, "naive", nil)
+			links := LinkGenerator(clientConfigFor(t, "naive",
+				map[string]interface{}{"username": "user", "password": pass}), inbound, "example.test", "someone")
+			if len(links) == 0 {
+				t.Fatal("no link generated")
+			}
+
+			var http2Link string
+			for _, l := range links {
+				if strings.HasPrefix(l, "http2://") {
+					http2Link = l
+					break
+				}
+			}
+			if http2Link == "" {
+				t.Fatalf("no http2 link among %v", links)
+			}
+
+			u, err := url.Parse(http2Link)
+			if err != nil {
+				t.Fatalf("link does not parse: %v", err)
+			}
+			out, _, err := parseNaiveLink(u, 0)
+			if err != nil {
+				t.Fatalf("parseNaiveLink: %v", err)
+			}
+			got := (*out)
+			if got["server"] != "example.test" {
+				t.Errorf("server = %v, want example.test", got["server"])
+			}
+			if got["username"] != "user" {
+				t.Errorf("username = %v, want user", got["username"])
+			}
+			if got["password"] != pass {
+				t.Errorf("password round trip: got %v, want %q", got["password"], pass)
+			}
+		})
+	}
+}
+
+// grpc carries its service name in the transport, and the vmess JSON has no
+// field for it -- it goes in "path". It used to be dropped, so every grpc vmess
+// link pointed at the default service.
+func TestVmessGrpcCarriesTheServiceName(t *testing.T) {
+	inbound := inboundFor(t, "vmess", map[string]interface{}{
+		"transport": map[string]interface{}{"type": "grpc", "service_name": "MyService"},
+	})
+	links := LinkGenerator(clientConfigFor(t, "vmess",
+		map[string]interface{}{"uuid": "11111111-1111-1111-1111-111111111111"}), inbound, "example.test", "someone")
+	if len(links) == 0 {
+		t.Fatal("no link generated")
+	}
+
+	raw, err := B64StrToByte(strings.TrimPrefix(links[0], "vmess://"))
+	if err != nil {
+		t.Fatalf("vmess payload is not base64: %v", err)
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatalf("vmess payload is not JSON: %v", err)
+	}
+	if obj["net"] != "grpc" {
+		t.Errorf("net = %v, want grpc", obj["net"])
+	}
+	if obj["path"] != "MyService" {
+		t.Errorf("path = %v, want MyService -- the grpc service name was dropped", obj["path"])
+	}
+}

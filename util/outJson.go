@@ -37,7 +37,7 @@ func FillOutJson(i *model.Inbound, hostname string) error {
 
 	outJson["type"] = i.Type
 	outJson["tag"] = i.Tag
-	outJson["server"] = hostname
+	outJson["server"] = NormalizeHost(hostname)
 	outJson["server_port"] = (*inbound)["listen_port"]
 
 	switch i.Type {
@@ -101,22 +101,38 @@ func addTls(out *map[string]interface{}, tls *model.Tls) {
 	if maxVersion, ok := tlsServer["max_version"]; ok {
 		tlsConfig["max_version"] = maxVersion
 	}
-	if certificate, ok := tlsServer["certificate"]; ok {
-		tlsConfig["certificate"] = certificate
+	if _, pinned := tlsConfig["certificate_public_key_sha256"]; !pinned {
+		if certificate, ok := tlsServer["certificate"]; ok {
+			tlsConfig["certificate"] = certificate
+		}
 	}
 	if cipherSuites, ok := tlsServer["cipher_suites"]; ok {
 		tlsConfig["cipher_suites"] = cipherSuites
 	}
-	if reality, ok := tlsServer["reality"].(map[string]interface{}); ok && reality["enabled"].(bool) {
-		realityConfig := tlsConfig["reality"].(map[string]interface{})
+	// Both sides of the handshake are given the same limit, as with the
+	// versions and cipher suites above.
+	if handshakeTimeout, ok := tlsServer["handshake_timeout"]; ok {
+		tlsConfig["handshake_timeout"] = handshakeTimeout
+	}
+	// Comma-ok on enabled and on the target map. Both were bare assertions, so
+	// a TLS record written before reality existed -- or one whose enabled flag
+	// came back as a string -- panicked while building a client config.
+	if reality, ok := tlsServer["reality"].(map[string]interface{}); ok && boolOr(reality["enabled"]) {
+		realityConfig, ok := tlsConfig["reality"].(map[string]interface{})
+		if !ok {
+			realityConfig = map[string]interface{}{}
+		}
 		realityConfig["enabled"] = true
 		if shortIDs, ok := reality["short_id"].([]interface{}); ok && len(shortIDs) > 0 {
 			realityConfig["short_id"] = shortIDs[common.RandomInt(len(shortIDs))]
 		}
 		tlsConfig["reality"] = realityConfig
 	}
-	if ech, ok := tlsServer["ech"].(map[string]interface{}); ok && ech["enabled"].(bool) {
-		echConfig := tlsConfig["ech"].(map[string]interface{})
+	if ech, ok := tlsServer["ech"].(map[string]interface{}); ok && boolOr(ech["enabled"]) {
+		echConfig, ok := tlsConfig["ech"].(map[string]interface{})
+		if !ok {
+			echConfig = map[string]interface{}{}
+		}
 		echConfig["enabled"] = true
 		echConfig["pq_signature_schemes_enabled"] = ech["pq_signature_schemes_enabled"]
 		echConfig["dynamic_record_sizing_disabled"] = ech["dynamic_record_sizing_disabled"]
@@ -127,7 +143,10 @@ func addTls(out *map[string]interface{}, tls *model.Tls) {
 }
 
 func naiveOut(out *map[string]interface{}, inbound map[string]interface{}) {
-	if quic_congestion_control, ok := inbound["quic_congestion_control"].(string); ok {
+	delete(*out, "quic")
+	delete(*out, "quic_congestion_control")
+
+	if quic_congestion_control, ok := inbound["quic_congestion_control"].(string); ok && quic_congestion_control != "" {
 		(*out)["quic"] = true
 		switch quic_congestion_control {
 		case "bbr_standard":

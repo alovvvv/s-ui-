@@ -1,7 +1,9 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"sync"
 	"time"
 
 	"github.com/alireza0/s-ui/logger"
@@ -18,7 +20,10 @@ type TokenInMemory struct {
 
 type APIv2Handler struct {
 	ApiService
-	tokens *[]TokenInMemory
+	// tokensMu guards tokens. Every request reads the slice while addToken and
+	// deleteToken replace it from a gin handler on another connection.
+	tokensMu sync.RWMutex
+	tokens   []TokenInMemory
 }
 
 func NewAPIv2Handler(g *gin.RouterGroup) *APIv2Handler {
@@ -47,12 +52,18 @@ func (a *APIv2Handler) postHandler(c *gin.Context) {
 		a.ApiService.RestartApp(c)
 	case "restartSb":
 		a.ApiService.RestartSb(c)
+	case "maintenance":
+		a.ApiService.SetMaintenance(c)
+	case "resetTraffic":
+		a.ApiService.ResetTraffic(c)
 	case "linkConvert":
 		a.ApiService.LinkConvert(c)
 	case "subConvert":
 		a.ApiService.SubConvert(c)
 	case "importdb":
 		a.ApiService.ImportDb(c)
+	case "getCertPing":
+		a.ApiService.GetCertPing(c)
 	default:
 		jsonMsg(c, "failed", common.NewError("unknown action: ", action))
 	}
@@ -97,12 +108,25 @@ func (a *APIv2Handler) getHandler(c *gin.Context) {
 
 func (a *APIv2Handler) findUsername(c *gin.Context) string {
 	token := c.Request.Header.Get("Token")
-	for index, t := range *a.tokens {
-		if t.Expiry > 0 && t.Expiry < time.Now().Unix() {
-			(*a.tokens) = append((*a.tokens)[:index], (*a.tokens)[index+1:]...)
+	if token == "" {
+		return ""
+	}
+
+	a.tokensMu.RLock()
+	defer a.tokensMu.RUnlock()
+
+	now := time.Now().Unix()
+	for _, t := range a.tokens {
+		// Expired entries are skipped, not spliced out. Deleting from the
+		// slice being ranged over shifted every later element back by one and
+		// skipped it, so one expired token could hide the valid token stored
+		// immediately after it -- and the write happened with no lock held.
+		if t.Expiry > 0 && t.Expiry < now {
 			continue
 		}
-		if t.Token == token {
+		// Constant time, so the response time of a wrong token does not reveal
+		// how many leading characters were right.
+		if subtle.ConstantTimeCompare([]byte(t.Token), []byte(token)) == 1 {
 			return t.Username
 		}
 	}
@@ -121,14 +145,19 @@ func (a *APIv2Handler) checkToken(c *gin.Context) {
 
 func (a *APIv2Handler) ReloadTokens() {
 	tokens, err := a.ApiService.LoadTokens()
-	if err == nil {
-		var newTokens []TokenInMemory
-		err = json.Unmarshal(tokens, &newTokens)
-		if err != nil {
-			logger.Error("unable to load tokens: ", err)
-		}
-		a.tokens = &newTokens
-	} else {
+	if err != nil {
 		logger.Error("unable to load tokens: ", err)
+		return
 	}
+	var newTokens []TokenInMemory
+	if err := json.Unmarshal(tokens, &newTokens); err != nil {
+		// Published only on success. The old code installed the half-filled
+		// slice from a failed unmarshal, which revoked every working token.
+		logger.Error("unable to load tokens: ", err)
+		return
+	}
+
+	a.tokensMu.Lock()
+	a.tokens = newTokens
+	a.tokensMu.Unlock()
 }

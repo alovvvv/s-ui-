@@ -24,3 +24,13 @@ frontend/.vite
 # Editor directories and files
 .idea
 .vscode
+
+# Secrets and local state must never enter the build context: everything here
+# is readable by every layer and ends up in the image history.
+.git
+.github
+cert/
+*.pem
+*.key
+*.crt
+.env

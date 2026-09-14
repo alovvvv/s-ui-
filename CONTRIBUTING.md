@@ -76,7 +76,8 @@ The **frontend** lives in a submodule. If you only work on the backend, you can 
    mkdir -p web/html
    rm -rf web/html/*
    cp -R frontend/dist/* web/html/
-   go build -ldflags "-w -s" -tags "with_quic,with_grpc,with_utls,with_acme,with_gvisor,with_tailscale" -o sui main.go
+   . ./build-tags.sh
+   go build -ldflags "$(ldflags_for dev)" -tags "$(tags_for dev)" -o sui main.go
    ```
 
 3. Run:
@@ -87,11 +88,21 @@ The **frontend** lives in a submodule. If you only work on the backend, you can 
 
 ### Build Tags
 
-The backend is built with these tags for full functionality:
+`build-tags.sh` is the single source of truth for the tags and the linker flags that go
+with them. Ask for a profile by name rather than copying a list:
 
-- `with_quic`, `with_grpc`, `with_utls`, `with_acme`, `with_gvisor`, `with_tailscale`
+```bash
+. ./build-tags.sh
+TAGS=$(tags_for dev)
+go build -tags "$TAGS" -ldflags "$(ldflags_for dev)" ...
+```
 
-Use the same tags when building locally if you need feature parity with releases.
+Profiles: `test`, `dev`, `release`, `windows`, `docker`. Assign before use, so an unknown
+name aborts under `set -e` instead of expanding to an empty string.
+
+Use these when building or testing locally, otherwise you get the stub implementations for
+OpenVPN, OpenConnect, Tailscale, Cloudflared and naive instead of the real ones. The file
+documents the per-platform deltas (Windows and Docker swap `with_musl` for `with_purego`).
 
 ### Environment Variables (development)
 
@@ -159,20 +170,48 @@ When adding new features, place code in the appropriate layer (handler → servi
 
 ### Current State
 
-- The project does not yet have a formal test suite (no `*_test.go` files in the repo).
-- CI currently focuses on **builds** (e.g. `release.yml`) rather than automated tests.
+- The repo has tests under `core/`, `database/`, `service/`, `sub/` and `util/`, using the
+  standard library `testing` package. There is no assertion library -- `t.Fatal` for setup
+  failures, `t.Errorf` for assertions.
+- `.github/workflows/test.yml` runs `gofmt`, `go vet`, the tests and the race detector on
+  every pull request.
 
-### What You Can Do Now
+### Running the Tests
 
-1. **Build verification**: Before submitting a PR, ensure the project builds:
+Tests must be run with the release build tags. Several protocols sit behind tags, and
+without them sing-box swaps in the stubs from `core/register_*_stub.go` -- the compat
+tests then skip rather than cover anything:
 
-   ```bash
-   go build -ldflags "-w -s" -tags "with_quic,with_grpc,with_utls,with_acme,with_gvisor,with_tailscale" -o sui main.go
-   ```
+```bash
+. ./build-tags.sh
+TAGS=$(tags_for test)
+go test -tags "$TAGS" ./...
+go test -race -short -tags "$TAGS" ./api/... ./service/... ./sub/... ./database/... ./util/... ./logger/... ./network/...
+```
 
-2. **Manual testing**: Run with `./runSUI.sh`, test the changed area (panel, API, subscription, etc.).
+Use `test`, not `dev`: `dev` adds the cronet tags, which need a toolchain only the release
+workflow sets up. `test` is what the release builds for armv6, armv5 and s390x, so nothing
+goes uncovered.
 
-3. **Future tests**: Contributions that add **unit tests** (e.g. for `util/`, `service/`, or API handlers) or **integration tests** are very welcome. Prefer the standard library `testing` package and table-driven tests where appropriate.
+A check in `.github/workflows/test.yml` fails the build if a tag list is pasted inline
+anywhere outside `build-tags.sh`.
+
+### Writing Tests
+
+- Table-driven subtests with `t.Run`, following the existing files.
+- `t.TempDir()` for scratch space -- never `/tmp` or `os.MkdirTemp`.
+- For a database, `database/migration_singbox114_test.go` has `openTestDB(t)` (raw schema,
+  no migrations); `service` tests call `database.InitDB(...)` when they need the full
+  migrated schema.
+- In `core`, wrap a `NewBox` error with `skipIfFeatureMissing(t, err)` (`core/main_test.go`)
+  so the test skips in a build without the tag instead of failing.
+- Say *why* the case exists in a comment. Regression tests should name the bug they lock down.
+
+### Manual Testing
+
+Run with `./runSUI.sh` and exercise the changed area. Note the panel must keep working
+over **both plain HTTP and HTTPS** -- check login, session persistence across a refresh,
+and logout in both modes when touching anything in `api/session.go`, `web/` or `network/`.
 
 ### Running the Linter (optional)
 

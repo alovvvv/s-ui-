@@ -6,28 +6,44 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/util/common"
 )
 
+// maxExternalBody caps what an external subscription may return. The response
+// used to be read with io.ReadAll straight into memory, so a URL an operator
+// pasted once -- or a host that was later taken over -- could answer with an
+// endless stream and take the panel down with it.
+const maxExternalBody = 8 << 20 // 8 MiB
+
+// externalClient verifies certificates. InsecureSkipVerify was set here, which
+// is exactly the wrong trade for this call: the response is turned into client
+// configurations, so anyone able to intercept it chooses the servers every
+// client of the panel then connects to.
+var externalClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	},
+}
+
 func GetExternalLink(url string) string {
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-
-	client := &http.Client{Transport: tr}
-
-	response, err := client.Get(url)
+	response, err := externalClient.Get(url)
 	if err != nil {
 		logger.Warning("sub: Error making HTTP request:", err)
 		return ""
 	}
 	defer response.Body.Close()
 
-	body, err := io.ReadAll(response.Body)
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxExternalBody))
 	if err != nil {
 		logger.Warning("sub: Error reading response body:", err)
+		return ""
+	}
+	if len(body) == maxExternalBody {
+		logger.Warning("sub: external subscription exceeded ", maxExternalBody, " bytes, refusing: ", url)
 		return ""
 	}
 

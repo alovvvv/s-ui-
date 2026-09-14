@@ -2,6 +2,7 @@ package sub
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/alireza0/s-ui/logger"
@@ -40,6 +41,55 @@ func (s *LinkService) GetLinks(linkJson *json.RawMessage, types string, clientIn
 	return result
 }
 
+func (s *LinkService) GetExternalOutbounds(linkJson *json.RawMessage) ([]map[string]interface{}, []string) {
+	links := []Link{}
+	err := json.Unmarshal(*linkJson, &links)
+	if err != nil {
+		return nil, nil
+	}
+
+	var outbounds []map[string]interface{}
+	var tags []string
+
+	for _, link := range links {
+		switch link.Type {
+		case "external":
+			outbound, tag, err := util.GetOutbound(link.Uri, 0)
+			if err == nil && outbound != nil && len(tag) > 0 {
+				outbounds = append(outbounds, *outbound)
+				tags = append(tags, tag)
+			}
+		case "sub":
+			subOutbounds, err := util.GetExternalSub(link.Uri)
+			if err != nil {
+				logger.Warning("sub: Error getting external sub:", err)
+				continue
+			}
+			for _, outbound := range subOutbounds {
+				if tag, _ := outbound["tag"].(string); len(tag) > 0 {
+					outbounds = append(outbounds, outbound)
+					tags = append(tags, tag)
+				}
+			}
+		}
+	}
+
+	// Make tags unique; sing-box and clash reject duplicate tags/names.
+	seen := make(map[string]int)
+	for i, tag := range tags {
+		if n := seen[tag]; n > 0 {
+			newTag := fmt.Sprintf("%s-%d", tag, n)
+			seen[tag] = n + 1
+			tags[i] = newTag
+			outbounds[i]["tag"] = newTag
+		} else {
+			seen[tag] = 1
+		}
+	}
+
+	return outbounds, tags
+}
+
 func (s *LinkService) addClientInfo(uri string, clientInfo string) string {
 	if len(clientInfo) == 0 {
 		return uri
@@ -61,7 +111,10 @@ func (s *LinkService) addClientInfo(uri string, clientInfo string) string {
 			logger.Warning("sub: Error decoding vmess content:", err)
 			return uri
 		}
-		vmessJson["ps"] = vmessJson["ps"].(string) + clientInfo
+		// A vmess link with no "ps", or one whose "ps" is not a string, used
+		// to panic here and take down the whole subscription response.
+		ps, _ := vmessJson["ps"].(string)
+		vmessJson["ps"] = ps + clientInfo
 		result, err := json.MarshalIndent(vmessJson, "", "  ")
 		if err != nil {
 			logger.Warning("sub: Error decoding vmess + clientInfo content:", err)

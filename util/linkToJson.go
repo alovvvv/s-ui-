@@ -417,9 +417,13 @@ func parseNaiveLink(u *url.URL, i int) (*map[string]interface{}, string, error) 
 	switch u.Scheme {
 	case "http2":
 		decoded := StrOrBase64Encoded(u.Hostname())
-		if idx := strings.Index(decoded, "@"); idx != -1 {
+		// LastIndex, not Index: the userinfo is not escaped inside the base64
+		// payload, so a password containing an @ split the string at the wrong
+		// place and produced a host of "ss@example.test" out of thin air.
+		if idx := strings.LastIndex(decoded, "@"); idx != -1 {
 			userInfo := decoded[:idx]
 			hostPort := decoded[idx+1:]
+			// First colon, so a password containing one stays whole.
 			if idx2 := strings.Index(userInfo, ":"); idx2 != -1 {
 				username = userInfo[:idx2]
 				password = userInfo[idx2+1:]

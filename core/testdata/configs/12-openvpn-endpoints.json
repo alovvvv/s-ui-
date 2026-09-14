@@ -1,0 +1,58 @@
+{
+  "log": {
+    "level": "error"
+  },
+  "endpoints": [
+    {
+      "type": "openvpn-server",
+      "tag": "openvpn-server-in",
+      "listen": "127.0.0.1",
+      "listen_port": 42301,
+      "network": "udp",
+      "mode": "tls",
+      "address": ["10.8.0.1/24"],
+      "users": [{ "username": "u", "password": "p" }],
+      "tls": {
+        "certificate_path": "__CERT__",
+        "key_path": "__KEY__",
+        "client_certificate_path": "__CERT__",
+        "verify_client_certificate": "require",
+        "version_min": "1.2"
+      }
+    },
+    {
+      "type": "openvpn-client",
+      "tag": "openvpn-client-out",
+      "server": "127.0.0.1",
+      "server_port": 42301,
+      "network": "udp",
+      "mode": "tls",
+      "username": "u",
+      "password": "p",
+      "tls": {
+        "certificate_path": "__CERT__",
+        "client_certificate_path": "__CERT__",
+        "client_key_path": "__KEY__",
+        "version_min": "1.2"
+      }
+    },
+    {
+      "type": "openconnect",
+      "tag": "openconnect-out",
+      "server": "127.0.0.1:42302",
+      "flavor": "anyconnect",
+      "username": "u",
+      "password": "p",
+      "tls": {
+        "certificate_authority_path": "__CERT__",
+        "server_name": "t.example.com"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

@@ -1,9 +1,14 @@
-FROM --platform=$BUILDPLATFORM node:alpine AS front-builder
+# Base images are pinned by digest, not by a floating tag. "node:alpine" and
+# "alpine" resolved to whatever was published that day, so two builds of the
+# same commit could differ, and a bad upstream push reached every build at once.
+# The tag is kept alongside the digest so it is obvious what is pinned; the
+# digest is what docker enforces.
+FROM --platform=$BUILDPLATFORM node:26-alpine@sha256:ef24c5053d50fdc3e4e56eb4e7ddb7861874ab0fdc797046ba897581deb8e868 AS front-builder
 WORKDIR /app
 COPY frontend/ ./
 RUN npm install && npm run build
 
-FROM golang:1.26-alpine AS backend-builder
+FROM golang:1.26-alpine@sha256:ce864e7223ac17b1775e6fd0b4c0db580c2eb50e7953a427916379e4b92a1628 AS backend-builder
 WORKDIR /app
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -11,7 +16,8 @@ ENV CGO_ENABLED=1
 ENV CGO_CFLAGS="-D_LARGEFILE64_SOURCE"
 ENV GOARCH=$TARGETARCH
 
-RUN apk update && apk add --no-cache \
+RUN apk upgrade --no-cache --scripts=no apk-tools && \
+    apk add --no-cache \
     gcc \
     musl-dev \
     libc-dev \
@@ -34,15 +40,31 @@ COPY . .
 COPY --from=front-builder /app/dist/ /app/web/html/
 
 RUN if [ "$TARGETARCH" = "arm" ]; then export GOARM=7; [ "$TARGETVARIANT" = "v6" ] && export GOARM=6; fi; \
-    go build -ldflags="-w -s" \
-    -tags "with_quic,with_grpc,with_utls,with_acme,with_gvisor,with_naive_outbound,with_purego,with_tailscale" \
-    -o sui main.go
+    . ./build-tags.sh && \
+    TAGS=$(tags_for docker) && \
+    LDFLAGS=$(ldflags_for docker) && \
+    go build -ldflags="$LDFLAGS" -tags "$TAGS" -o sui main.go
 
-FROM alpine
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 LABEL org.opencontainers.image.authors="alireza7@gmail.com"
 ENV TZ=Asia/Tehran
 WORKDIR /app
-RUN set -ex && apk add --no-cache --upgrade bash tzdata ca-certificates nftables
+RUN set -ex && apk upgrade --no-cache --scripts=no apk-tools && \
+    apk add --no-cache --upgrade bash ca-certificates nftables su-exec && \
+    addgroup -S -g 10001 sui && \
+    adduser -S -u 10001 -G sui -h /app -s /sbin/nologin sui
 COPY --from=backend-builder /app/sui /app/libcronet.so /app/
 COPY entrypoint.sh /app/
+
+# Asks the binary, which reads the port the operator actually configured. A
+# check with the port written in here goes red the moment they change it in the
+# panel, and an orchestrator then kills a container that was working.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD ["./sui", "healthcheck"]
+
+# The container still starts as root by default: a TUN inbound needs
+# CAP_NET_ADMIN in the process's permitted set, and a panel port below 1024
+# needs CAP_NET_BIND_SERVICE. Flipping the default would break both, silently,
+# on every existing deployment. Set SUI_UID (and optionally SUI_GID) to have
+# entrypoint.sh hand over to an unprivileged user instead -- see entrypoint.sh.
 ENTRYPOINT [ "./entrypoint.sh" ]

@@ -16,6 +16,7 @@ func ParseCmd() {
 
 	adminCmd := flag.NewFlagSet("admin", flag.ExitOnError)
 	settingCmd := flag.NewFlagSet("setting", flag.ExitOnError)
+	backupCmd := flag.NewFlagSet("backup", flag.ExitOnError)
 
 	var username string
 	var password string
@@ -24,7 +25,12 @@ func ParseCmd() {
 	var subPort int
 	var subPath string
 	var reset bool
+	var assumeYes bool
 	var show bool
+	var output string
+	var exclude string
+	backupCmd.StringVar(&output, "output", "", "backup output file path (use - for stdout)")
+	backupCmd.StringVar(&exclude, "exclude", "", "comma-separated tables to exclude: changes,stats")
 	settingCmd.BoolVar(&reset, "reset", false, "reset all settings")
 	settingCmd.BoolVar(&show, "show", false, "show current settings")
 	settingCmd.IntVar(&port, "port", 0, "set panel port")
@@ -34,6 +40,7 @@ func ParseCmd() {
 
 	adminCmd.BoolVar(&show, "show", false, "show first admin credentials")
 	adminCmd.BoolVar(&reset, "reset", false, "reset first admin credentials")
+	adminCmd.BoolVar(&assumeYes, "yes", false, "skip the confirmation prompt for -reset")
 	adminCmd.StringVar(&username, "username", "", "set login username")
 	adminCmd.StringVar(&password, "password", "", "set login password")
 
@@ -46,10 +53,14 @@ func ParseCmd() {
 		fmt.Println("    uri            Show panel URI")
 		fmt.Println("    migrate        migrate form older version")
 		fmt.Println("    setting        set/reset/show settings")
+		fmt.Println("    healthcheck    exit 0 if the panel is listening on its configured port")
+		fmt.Println("    backup         create a database backup")
 		fmt.Println()
 		adminCmd.Usage()
 		fmt.Println()
 		settingCmd.Usage()
+		fmt.Println()
+		backupCmd.Usage()
 	}
 
 	flag.Parse()
@@ -78,7 +89,7 @@ func ParseCmd() {
 		case show:
 			showAdmin()
 		case reset:
-			resetAdmin()
+			resetAdmin(assumeYes)
 		default:
 			updateAdmin(username, password)
 			showAdmin()
@@ -87,8 +98,14 @@ func ParseCmd() {
 	case "uri":
 		getPanelURI()
 
+	case "healthcheck":
+		healthCheck()
+
 	case "migrate":
-		migration.MigrateDb()
+		if err := migration.MigrateDb(); err != nil {
+			fmt.Println("Migration failed:", err)
+			os.Exit(1)
+		}
 
 	case "setting":
 		err := settingCmd.Parse(os.Args[2:])
@@ -105,6 +122,14 @@ func ParseCmd() {
 			updateSetting(port, path, subPort, subPath)
 			showSetting()
 		}
+
+	case "backup":
+		err := backupCmd.Parse(os.Args[2:])
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		backupDb(output, exclude)
 	default:
 		fmt.Println("Invalid subcommands")
 		flag.Usage()

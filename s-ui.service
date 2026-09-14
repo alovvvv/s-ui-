@@ -10,5 +10,22 @@ ExecStart=/usr/local/s-ui/sui
 Restart=on-failure
 RestartSec=10s
 
+# A proxy holds two file descriptors per connection, and the default 1024 is
+# reached by a few hundred clients. Sockets then fail to open with no obvious
+# cause beyond "too many open files" in the log.
+LimitNOFILE=1048576
+
+# Nothing this service runs needs to gain privileges it was not started with.
+NoNewPrivileges=true
+
+# Its own /tmp, so nothing else on the host can read or replace the scratch
+# files the backup and import paths create.
+PrivateTmp=true
+
+# read-only rather than true: s-ui.sh installs acme.sh certificates under
+# /root/cert and the panel has to be able to read them. The service never
+# writes there.
+ProtectHome=read-only
+
 [Install]
 WantedBy=multi-user.target

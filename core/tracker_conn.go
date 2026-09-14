@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofrs/uuid/v5"
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-tun"
 	"github.com/sagernet/sing/common/buf"
 	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/common/network"
@@ -19,6 +20,7 @@ type ConnectionInfo struct {
 	Conn       net.Conn
 	PacketConn network.PacketConn
 	Inbound    string
+	User       string
 	Type       string // "tcp" or "udp"
 }
 
@@ -57,6 +59,7 @@ func (c *ConnTracker) RoutedConnection(ctx context.Context, conn net.Conn, metad
 		ID:      connID,
 		Conn:    conn,
 		Inbound: metadata.Inbound,
+		User:    metadata.User,
 		Type:    "tcp",
 	}
 
@@ -71,6 +74,7 @@ func (c *ConnTracker) RoutedPacketConnection(ctx context.Context, conn network.P
 		ID:         connID,
 		PacketConn: conn,
 		Inbound:    metadata.Inbound,
+		User:       metadata.User,
 		Type:       "udp",
 	}
 
@@ -95,6 +99,30 @@ func (c *ConnTracker) CloseConnByInbound(inbound string) int {
 			delete(c.connections, connID)
 			closedCount++
 		}
+	}
+	return closedCount
+}
+
+func (c *ConnTracker) CloseConnByInboundUsers(inbound string, keepUsers map[string]struct{}) int {
+	c.access.Lock()
+	defer c.access.Unlock()
+
+	closedCount := 0
+	for connID, connInfo := range c.connections {
+		if connInfo.Inbound != inbound {
+			continue
+		}
+		if _, keep := keepUsers[connInfo.User]; keep {
+			continue
+		}
+		if connInfo.Conn != nil {
+			connInfo.Conn.Close()
+		}
+		if connInfo.PacketConn != nil {
+			connInfo.PacketConn.Close()
+		}
+		delete(c.connections, connID)
+		closedCount++
 	}
 	return closedCount
 }
@@ -216,4 +244,8 @@ func (w *wrappedPacketConn) Close() error {
 
 func (w *wrappedPacketConn) Upstream() any {
 	return w.PacketConn
+}
+
+func (t *ConnTracker) RoutedFlow(ctx context.Context, metadata adapter.InboundContext, matchedRule adapter.Rule, matchOutbound adapter.Outbound) tun.FlowTracker {
+	return nil
 }

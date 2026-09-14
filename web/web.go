@@ -19,6 +19,7 @@ import (
 	"github.com/alireza0/s-ui/middleware"
 	"github.com/alireza0/s-ui/network"
 	"github.com/alireza0/s-ui/service"
+	"github.com/alireza0/s-ui/util/common"
 
 	"github.com/gin-contrib/gzip"
 	"github.com/gin-contrib/sessions"
@@ -28,6 +29,14 @@ import (
 
 //go:embed *
 var content embed.FS
+
+// trustedProxies are the peers whose X-Forwarded-* headers are believed: the
+// loopback and private ranges a reverse proxy in front of the panel lives in.
+var trustedProxies = []string{
+	"127.0.0.0/8", "::1/128",
+	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+	"169.254.0.0/16", "fe80::/10",
+}
 
 type Server struct {
 	httpServer     *http.Server
@@ -55,6 +64,14 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	}
 
 	engine := gin.Default()
+
+	// gin trusts every proxy by default, so any client could set
+	// X-Forwarded-For and forge the address written to the login log. Only a
+	// loopback or private peer is a plausible reverse proxy; a direct client
+	// from the internet is now reported by its real address.
+	if err := engine.SetTrustedProxies(trustedProxies); err != nil {
+		return nil, err
+	}
 
 	// Load the HTML template
 	t := template.New("").Funcs(engine.FuncMap)
@@ -86,7 +103,17 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	engine.Use(gzip.Gzip(gzip.DefaultCompression))
 	assetsBasePath := base_url + "assets/"
 
+	sessionMaxAge, err := s.settingService.GetSessionMaxAge()
+	if err != nil {
+		return nil, err
+	}
+
 	store := cookie.NewStore(secret)
+	// The per-session options set at login only reach the cookie the login
+	// response writes. Without the same lifetime on the store, every later
+	// response rewrote the cookie as a session cookie, so "remember me" lasted
+	// until the browser was closed whatever the operator configured.
+	store.Options(api.BaseSessionOptions(sessionMaxAge))
 	engine.Use(sessions.Sessions("s-ui", store))
 
 	engine.Use(func(c *gin.Context) {
@@ -107,7 +134,10 @@ func (s *Server) initRouter() (*gin.Engine, error) {
 	group_apiv2 := engine.Group(base_url + "apiv2")
 	apiv2 := api.NewAPIv2Handler(group_apiv2)
 
-	group_api := engine.Group(base_url + "api")
+	// Only the cookie-authenticated group. apiv2 authenticates with a Token
+	// header, which a cross-site page cannot set without the panel answering a
+	// CORS preflight it never answers.
+	group_api := engine.Group(base_url+"api", middleware.SameOrigin())
 	api.NewAPIHandler(group_api, apiv2)
 
 	// Serve index.html as the entry point
@@ -169,28 +199,47 @@ func (s *Server) Start() (err error) {
 	if err != nil {
 		return err
 	}
-	if certFile != "" || keyFile != "" {
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	// Both or neither. This was an OR, so setting only one of the two put the
+	// server into TLS mode with half a configuration and failed to start with
+	// an error that named neither setting.
+	switch {
+	case certFile != "" && keyFile != "":
+		webDomain, err := s.settingService.GetWebDomain()
 		if err != nil {
 			listener.Close()
 			return err
 		}
-		c := &tls.Config{
-			Certificates: []tls.Certificate{cert},
+		c, err := network.NewTLSConfig(certFile, keyFile, webDomain)
+		if err != nil {
+			listener.Close()
+			return err
 		}
 		listener = network.NewAutoHttpsListener(listener)
 		listener = tls.NewListener(listener, c)
-	}
-
-	if certFile != "" || keyFile != "" {
 		logger.Info("web server run https on", listener.Addr())
-	} else {
+	case certFile != "" || keyFile != "":
+		listener.Close()
+		missing, set := "webKeyFile", "webCertFile"
+		if certFile == "" {
+			missing, set = "webCertFile", "webKeyFile"
+		}
+		return common.NewError("TLS needs both a certificate and a key: ", set,
+			" is set but ", missing, " is empty. Set both to serve HTTPS, or clear both to serve HTTP.")
+	default:
 		logger.Info("web server run http on", listener.Addr())
 	}
 	s.listener = listener
 
 	s.httpServer = &http.Server{
 		Handler: engine,
+		// Without a header deadline a connection that never finishes its
+		// request headers holds a goroutine and a file descriptor for good.
+		// The body and response limits are deliberately generous: a database
+		// import uploads a file, and checkOutbound runs a 15s probe.
+		ReadHeaderTimeout: 20 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
 	}
 
 	go func() {

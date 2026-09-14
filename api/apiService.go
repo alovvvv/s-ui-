@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"runtime"
 	"strconv"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/alireza0/s-ui/logger"
 	"github.com/alireza0/s-ui/service"
 	"github.com/alireza0/s-ui/util"
+	"github.com/alireza0/s-ui/util/common"
 
 	"github.com/gin-gonic/gin"
 )
@@ -46,8 +48,18 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 	}
 	onlines, err := a.StatsService.GetOnlines()
 
+	// Carried on every poll so the panel can keep saying the core is down on
+	// purpose, wherever the operator happens to be looking.
+	maintenance, mErr := a.SettingService.GetMaintenance()
+	if mErr != nil {
+		logger.Warning("unable to read maintenance setting:", mErr)
+	}
+	data["maintenance"] = maintenance
+
 	sysInfo := a.ServerService.GetSingboxInfo()
-	if sysInfo["running"] == false {
+	// A core stopped on purpose is not a failure to report; without this the
+	// panel raises the last log as an error on every poll of a quiet system.
+	if sysInfo["running"] == false && !maintenance {
 		logs := a.ServerService.GetLogs("1", "debug")
 		if len(logs) > 0 {
 			data["lastLog"] = logs[0]
@@ -104,6 +116,7 @@ func (a *ApiService) getData(c *gin.Context) (interface{}, error) {
 		data["subURI"] = subURI
 		data["enableTraffic"] = trafficAge > 0
 		data["onlines"] = onlines
+		data["os"] = runtime.GOOS
 	} else {
 		data["onlines"] = onlines
 	}
@@ -197,7 +210,9 @@ func (a *ApiService) GetStats(c *gin.Context) {
 	if err != nil {
 		limit = 100
 	}
-	data, err := a.StatsService.GetStats(resource, tag, limit)
+	start, _ := strconv.ParseInt(c.Query("start"), 10, 64)
+	end, _ := strconv.ParseInt(c.Query("end"), 10, 64)
+	data, err := a.StatsService.GetStats(resource, tag, limit, start, end)
 	if err != nil {
 		jsonMsg(c, "", err)
 		return
@@ -208,6 +223,15 @@ func (a *ApiService) GetStats(c *gin.Context) {
 func (a *ApiService) GetStatus(c *gin.Context) {
 	request := c.Query("r")
 	result := a.ServerService.GetStatus(request)
+	// A core that is down on purpose looks exactly like a core that crashed,
+	// and the panel has to tell the operator which one it is looking at.
+	if sbd, ok := (*result)["sbd"].(map[string]interface{}); ok {
+		maintenance, err := a.SettingService.GetMaintenance()
+		if err != nil {
+			logger.Warning("unable to read maintenance setting:", err)
+		}
+		sbd["maintenance"] = maintenance
+	}
 	jsonObj(c, result, nil)
 }
 
@@ -272,22 +296,25 @@ func (a *ApiService) Login(c *gin.Context) {
 		logger.Infof("Unable to get session's max age from DB")
 	}
 
-	err = SetLoginUser(c, loginUser, sessionMaxAge)
-	if err == nil {
-		logger.Info("user ", loginUser, " login success")
-	} else {
-		logger.Warning("login failed: ", err)
+	if err = SetLoginUser(c, loginUser, sessionMaxAge); err != nil {
+		// Reported, not logged and swallowed: the old code answered "success"
+		// with no cookie set, so the panel bounced straight back to the login
+		// form with nothing to explain why.
+		logger.Warning("login failed to start a session: ", err)
+		jsonMsg(c, "", err)
+		return
 	}
+	logger.Info("user ", loginUser, " login success")
 
 	jsonMsg(c, "", nil)
 }
 
 func (a *ApiService) ChangePass(c *gin.Context) {
-	id := c.Request.FormValue("id")
+	loginUser := GetLoginUser(c)
 	oldPass := c.Request.FormValue("oldPass")
 	newUsername := c.Request.FormValue("newUsername")
 	newPass := c.Request.FormValue("newPass")
-	err := a.UserService.ChangePass(id, oldPass, newUsername, newPass)
+	err := a.UserService.ChangePass(loginUser, oldPass, newUsername, newPass)
 	if err == nil {
 		logger.Info("change user credentials success")
 		jsonMsg(c, "save", nil)
@@ -315,13 +342,35 @@ func (a *ApiService) Save(c *gin.Context, loginUser string) {
 }
 
 func (a *ApiService) RestartApp(c *gin.Context) {
-	err := a.PanelService.RestartPanel(3)
+	err := a.PanelService.RestartPanel(3 * time.Second)
 	jsonMsg(c, "restartApp", err)
 }
 
 func (a *ApiService) RestartSb(c *gin.Context) {
 	err := a.ConfigService.RestartCore()
 	jsonMsg(c, "restartSb", err)
+}
+
+// SetMaintenance stops the core and keeps it stopped, or starts it again. The
+// five-second watchdog would undo a plain stop, so this is the only way to hold
+// the core down from the panel.
+func (a *ApiService) SetMaintenance(c *gin.Context) {
+	enabled, err := strconv.ParseBool(c.Request.FormValue("enable"))
+	if err != nil {
+		jsonMsg(c, "maintenance", common.NewError("missing or invalid parameter: enable"))
+		return
+	}
+	err = a.ConfigService.SetMaintenance(enabled)
+	jsonMsg(c, "maintenance", err)
+}
+
+func (a *ApiService) ResetTraffic(c *gin.Context) {
+	if err := a.ClientService.ResetAllClientsTraffic(); err != nil {
+		jsonMsg(c, "resetTraffic", err)
+		return
+	}
+	err := a.ConfigService.RestartCore()
+	jsonMsg(c, "resetTraffic", err)
 }
 
 func (a *ApiService) LinkConvert(c *gin.Context) {
@@ -380,8 +429,9 @@ func (a *ApiService) AddToken(c *gin.Context) {
 }
 
 func (a *ApiService) DeleteToken(c *gin.Context) {
+	loginUser := GetLoginUser(c)
 	tokenId := c.Request.FormValue("id")
-	err := a.UserService.DeleteToken(tokenId)
+	err := a.UserService.DeleteToken(loginUser, tokenId)
 	jsonMsg(c, "", err)
 }
 
@@ -402,4 +452,11 @@ func (a *ApiService) GetCheckOutbound(c *gin.Context) {
 	link := c.Query("link")
 	result := a.ConfigService.CheckOutbound(tag, link)
 	jsonObj(c, result, nil)
+}
+
+func (a *ApiService) GetCertPing(c *gin.Context) {
+	domain := c.PostForm("domain")
+	port := c.PostForm("port")
+	tlsPing, err := util.GetTlsPing(domain, port)
+	jsonObj(c, tlsPing, err)
 }

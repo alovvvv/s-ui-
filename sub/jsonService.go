@@ -56,23 +56,14 @@ func (j *JsonService) GetJson(subId string, format string) (*string, []string, e
 		return nil, nil, err
 	}
 
-	outbounds, outTags, err := j.getOutbounds(client.Config, inDatas)
+	outbounds, outTags, err := j.getOutbounds(client.Config, inDatas, client.Remark)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	links := j.LinkService.GetLinks(&client.Links, "external", "")
-	tagNumEnable := 0
-	if len(links) > 1 {
-		tagNumEnable = 1
-	}
-	for index, link := range links {
-		json, tag, err := util.GetOutbound(link, (index+1)*tagNumEnable)
-		if err == nil && len(tag) > 0 {
-			*outbounds = append(*outbounds, *json)
-			*outTags = append(*outTags, tag)
-		}
-	}
+	extOutbounds, extTags := j.LinkService.GetExternalOutbounds(&client.Links)
+	*outbounds = append(*outbounds, extOutbounds...)
+	*outTags = append(*outTags, extTags...)
 
 	j.addDefaultOutbounds(outbounds, outTags)
 
@@ -95,6 +86,21 @@ func (j *JsonService) GetJson(subId string, format string) (*string, []string, e
 	return &resultStr, headers, nil
 }
 
+// uniqueOutboundTag keeps a name as the operator wrote it, falling back to a
+// numbered suffix only when that name is already in use. sing-box and clash
+// both reject duplicate tags.
+func uniqueOutboundTag(tag string, taken map[string]bool) string {
+	if !taken[tag] {
+		return tag
+	}
+	for i := 2; ; i++ {
+		candidate := fmt.Sprintf("%s-%d", tag, i)
+		if !taken[candidate] {
+			return candidate
+		}
+	}
+}
+
 func (j *JsonService) getData(subId string) (*model.Client, []*model.Inbound, error) {
 	db := database.GetDB()
 	client := &model.Client{}
@@ -115,10 +121,11 @@ func (j *JsonService) getData(subId string) (*model.Client, []*model.Inbound, er
 	return client, inbounds, nil
 }
 
-func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*model.Inbound) (*[]map[string]interface{}, *[]string, error) {
+func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*model.Inbound, clientRemark string) (*[]map[string]interface{}, *[]string, error) {
 	var outbounds []map[string]interface{}
 	var configs map[string]interface{}
 	var outTags []string
+	takenTags := make(map[string]bool)
 
 	err := json.Unmarshal(clientConfig, &configs)
 	if err != nil {
@@ -148,19 +155,30 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 				inbPass, _ := inbOptions["password"].(string)
 				userPass = append(userPass, inbPass)
 			}
+			// Two assertions chained: when the first fails it yields a nil
+			// map, and indexing that is fine, but the shape is worth reading
+			// in one step rather than trusting the chain.
 			var pass string
-			if method == "2022-blake3-aes-128-gcm" {
-				pass, _ = configs["shadowsocks16"].(map[string]interface{})["password"].(string)
-			} else {
-				pass, _ = configs["shadowsocks"].(map[string]interface{})["password"].(string)
+			if cfg, ok := configs[util.ShadowsocksClientConfigKey(method)].(map[string]interface{}); ok {
+				pass, _ = cfg["password"].(string)
 			}
 			userPass = append(userPass, pass)
 			outbound["password"] = strings.Join(userPass, ":")
 		} else { // Other protocols
 			config, _ := configs[protocol].(map[string]interface{})
 			for key, value := range config {
-				if key == "name" || key == "alterId" || (key == "flow" && inData.TlsId == 0) {
+				if key == "name" || key == "alterId" {
 					continue
+				}
+				if key == "flow" {
+					if inData.TlsId == 0 {
+						continue
+					}
+					if tr, ok := outbound["transport"].(map[string]interface{}); ok {
+						if transportType, _ := tr["type"].(string); transportType != "" {
+							continue
+						}
+					}
 				}
 				outbound[key] = value
 			}
@@ -173,23 +191,26 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 		}
 		tag, _ := outbound["tag"].(string)
 		if len(addrs) == 0 {
+			tag = util.JoinRemark(clientRemark, tag)
+			takenTags[tag] = true
+			outbound["tag"] = tag
 			// For mixed protocol, use separated socks and http
 			if protocol == "mixed" {
-				outbound["tag"] = tag
 				j.pushMixed(&outbounds, &outTags, outbound)
 			} else {
 				outTags = append(outTags, tag)
 				outbounds = append(outbounds, outbound)
 			}
 		} else {
-			for index, addr := range addrs {
+			for _, addr := range addrs {
 				// Copy original config
 				newOut := make(map[string]interface{}, len(outbound))
 				for key, value := range outbound {
 					newOut[key] = value
 				}
 				// Change and push copied config
-				newOut["server"], _ = addr["server"].(string)
+				server, _ := addr["server"].(string)
+				newOut["server"] = util.NormalizeHost(server)
 				port, _ := addr["server_port"].(float64)
 				newOut["server_port"] = int(port)
 
@@ -206,7 +227,12 @@ func (j *JsonService) getOutbounds(clientConfig json.RawMessage, inbounds []*mod
 				}
 
 				remark, _ := addr["remark"].(string)
-				newTag := fmt.Sprintf("%d.%s%s", index+1, tag, remark)
+				// Multiple addresses share one inbound tag, so the name only
+				// needs disambiguating when the addresses don't already carry
+				// distinct remarks. Numbering every one of them renamed nodes
+				// that had no conflict to begin with.
+				newTag := uniqueOutboundTag(util.JoinRemark(clientRemark, tag+remark), takenTags)
+				takenTags[newTag] = true
 				newOut["tag"] = newTag
 				// For mixed protocol, use separated socks and http
 				if protocol == "mixed" {
@@ -245,7 +271,10 @@ func (j *JsonService) addDefaultOutbounds(outbounds *[]map[string]interface{}, o
 }
 
 func (j *JsonService) addOthers(jsonConfig *map[string]interface{}) error {
-	rules_start := []interface{}{
+	// Default routing rules, used only when the template doesn't define its own.
+	// When the template provides `rules`, they are used verbatim so the user has
+	// full control over ordering (e.g. rules before sniff) and which rules exist.
+	defaultRules := []interface{}{
 		map[string]interface{}{
 			"action": "sniff",
 		},
@@ -254,8 +283,6 @@ func (j *JsonService) addOthers(jsonConfig *map[string]interface{}) error {
 			"action":     "route",
 			"outbound":   "direct",
 		},
-	}
-	rules_end := []interface{}{
 		map[string]interface{}{
 			"clash_mode": "Global",
 			"action":     "route",
@@ -265,7 +292,7 @@ func (j *JsonService) addOthers(jsonConfig *map[string]interface{}) error {
 	route := map[string]interface{}{
 		"auto_detect_interface": true,
 		"final":                 "proxy",
-		"rules":                 rules_start,
+		"rules":                 defaultRules,
 	}
 
 	othersStr, err := j.SettingService.GetSubJsonExt()
@@ -296,16 +323,103 @@ func (j *JsonService) addOthers(jsonConfig *map[string]interface{}) error {
 	if _, ok := othersJson["rule_set"]; ok {
 		route["rule_set"] = othersJson["rule_set"]
 	}
+	j.addHTTPClients(jsonConfig, route, othersJson)
 	if settingRules, ok := othersJson["rules"].([]interface{}); ok {
-		rules := append(rules_start, settingRules...)
-		route["rules"] = append(rules, rules_end...)
+		route["rules"] = settingRules
 	}
-	if defaultDomainResolver, ok := othersJson["default_domain_resolver"].(string); ok {
+	if defaultDomainResolver, ok := othersJson["default_domain_resolver"].(string); ok && defaultDomainResolver != "" {
 		route["default_domain_resolver"] = defaultDomainResolver
+	} else if fallback := fallbackDomainResolver(othersJson); fallback != "" {
+		// With more than one DNS server and no resolver named for dial fields,
+		// sing-box has to guess which one resolves outbound server domains and
+		// reports the guess as deprecated. The template's final server is the
+		// one it would have to fall back to anyway.
+		route["default_domain_resolver"] = fallback
+	}
+	if v, ok := othersJson["override_android_vpn"]; ok {
+		route["override_android_vpn"] = v
+	}
+	if final, ok := othersJson["final"].(string); ok && final != "" {
+		route["final"] = final
 	}
 	(*jsonConfig)["route"] = route
 
 	return nil
+}
+
+// fallbackDomainResolver returns the DNS server dial fields should resolve
+// through when the template names none, or "" when the config has too few
+// servers for the choice to matter.
+func fallbackDomainResolver(othersJson map[string]interface{}) string {
+	dns, ok := othersJson["dns"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	servers, ok := dns["servers"].([]interface{})
+	if !ok || len(servers) < 2 {
+		return ""
+	}
+	if final, ok := dns["final"].(string); ok && final != "" {
+		return final
+	}
+	// No final server either: the first one is what sing-box treats as default.
+	if first, ok := servers[0].(map[string]interface{}); ok {
+		tag, _ := first["tag"].(string)
+		return tag
+	}
+	return ""
+}
+
+// defaultHTTPClientTag names the HTTP client the generated config declares for
+// downloading remote rule-sets.
+const defaultHTTPClientTag = "default"
+
+// addHTTPClients carries the template's HTTP clients across and, when the
+// config downloads remote rule-sets without naming a client for them, declares
+// one. Left implicit, sing-box 1.14 falls back to the default outbound and
+// reports the fallback as deprecated; an explicit client says the same thing
+// and keeps the client's log clean.
+func (j *JsonService) addHTTPClients(jsonConfig *map[string]interface{}, route map[string]interface{}, othersJson map[string]interface{}) {
+	if clients, ok := othersJson["http_clients"]; ok {
+		(*jsonConfig)["http_clients"] = clients
+	}
+	if defaultClient, ok := othersJson["default_http_client"].(string); ok && defaultClient != "" {
+		route["default_http_client"] = defaultClient
+		return
+	}
+	// A template that brings its own clients decides for itself.
+	if _, ok := (*jsonConfig)["http_clients"]; ok {
+		return
+	}
+	if !needsDefaultHTTPClient(route) {
+		return
+	}
+	(*jsonConfig)["http_clients"] = []interface{}{
+		map[string]interface{}{"tag": defaultHTTPClientTag},
+	}
+	route["default_http_client"] = defaultHTTPClientTag
+}
+
+// needsDefaultHTTPClient reports whether any remote rule-set would fall back to
+// the implicit default HTTP client.
+func needsDefaultHTTPClient(route map[string]interface{}) bool {
+	ruleSets, ok := route["rule_set"].([]interface{})
+	if !ok {
+		return false
+	}
+	for _, entry := range ruleSets {
+		ruleSet, isObject := entry.(map[string]interface{})
+		if !isObject {
+			continue
+		}
+		if ruleSetType, _ := ruleSet["type"].(string); ruleSetType != "remote" {
+			continue
+		}
+		if _, hasClient := ruleSet["http_client"]; !hasClient {
+			return true
+		}
+	}
+	return false
 }
 
 func (j *JsonService) pushMixed(outbounds *[]map[string]interface{}, outTags *[]string, out map[string]interface{}) {

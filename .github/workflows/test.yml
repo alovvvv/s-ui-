@@ -1,0 +1,72 @@
+name: Test
+
+# No push trigger: release.yml calls this as its gate, so a push would otherwise
+# run the suite twice.
+on:
+  workflow_dispatch:
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          cache: false
+          go-version-file: go.mod
+
+      - name: Check formatting
+        run: |
+          set -e
+          unformatted=$(gofmt -l . | grep -v '^frontend/' || true)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      # A list pasted back into a workflow or Dockerfile compiles fine and then
+      # drifts in silence. with_qui[c] so the pattern misses its own line.
+      - name: No hardcoded build tags
+        run: |
+          set -e
+          hits=$(grep -rn 'with_qui[c]' \
+                   --include='*.yml' --include='*.yaml' \
+                   --include='Dockerfile*' --include='*.sh' \
+                   --exclude-dir=node_modules --exclude-dir=.git . \
+                 | grep -v 'build-tags\.sh:' || true)
+          if [ -n "$hits" ]; then
+            echo "Build tags belong in build-tags.sh, not inline:" >&2
+            echo "$hits" >&2
+            exit 1
+          fi
+
+      # "test", not "dev": same protocols, minus the cronet tags no stock
+      # toolchain can link. It is what release.yml builds for armv6/armv5/s390x.
+      - name: Test
+        run: |
+          set -e
+          . ./build-tags.sh
+          TAGS=$(tags_for test)
+          go test -tags "$TAGS" ./...
+
+      # Scoped to the packages that are clean today, so this fails on a race we
+      # introduce rather than the known upstream one in route.NetworkManager.
+      - name: Test with race detector
+        run: |
+          set -e
+          . ./build-tags.sh
+          TAGS=$(tags_for test)
+          go test -race -short -tags "$TAGS" ./api/... ./service/... ./sub/... ./database/... ./util/... ./logger/... ./network/...

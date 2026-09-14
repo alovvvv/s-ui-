@@ -9,33 +9,37 @@ on:
       - main
     tags:
       - "*"
-    paths:
-      - '.github/workflows/release.yml'
-      - 'frontend/**'
-      - '**.sh'
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - 's-ui.service'
+
+permissions:
+  contents: read
 
 env:
-  NODE_VERSION: "25"
-  CRONET_GO_VERSION: "2faf34666c2cc8234f10f2ab6d4c4d6104d34ae2"
+  NODE_VERSION: "26"
   CRONET_GO_REPO: https://github.com/sagernet/cronet-go.git
   BOOTLIN_BASE_URL: https://toolchains.bootlin.com/downloads/releases/toolchains
+  LIBCRONET_BASE_URL: "https://github.com/SagerNet/cronet-go/releases/latest/download"
 
 jobs:
+  test:
+    # Skipped on a tag and on a published release: both ship a commit that
+    # already went through this gate on main.
+    if: ${{ github.event_name != 'release' && !startsWith(github.ref, 'refs/tags/') }}
+    uses: ./.github/workflows/test.yml
+
   build-frontend:
+    needs: test
+    # A skipped gate is not a failed one, so the build still runs on a tag.
+    if: ${{ always() && needs.test.result != 'failure' && needs.test.result != 'cancelled' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository (frontend only)
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           submodules: recursive
           fetch-depth: 1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -49,7 +53,7 @@ jobs:
           cd ..
 
       - name: Upload frontend dist
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: frontend-dist
           path: frontend/dist/
@@ -57,6 +61,9 @@ jobs:
   build-linux:
     name: build-${{ matrix.platform }}
     needs: build-frontend
+    # The `always()` on build-frontend only rescues that job: a skipped `test`
+    # keeps propagating down the graph unless every dependent repeats it.
+    if: ${{ always() && needs.build-frontend.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -64,26 +71,36 @@ jobs:
           - { platform: amd64, arch: amd64, bootlin: x86-64, naive: true }
           - { platform: arm64, arch: arm64, bootlin: aarch64, naive: true }
           - { platform: armv7, arch: arm, goarm: "7", bootlin: armv7-eabihf, naive: true }
-          - { platform: armv6, arch: arm, goarm: "6", bootlin: armv6-eabihf, naive: true }
+          - { platform: armv6, arch: arm, goarm: "6", bootlin: armv6-eabihf, naive: false }
           - { platform: armv5, arch: arm, goarm: "5", bootlin: armv5-eabi, naive: false }
           - { platform: "386", arch: "386", bootlin: x86-i686, naive: true }
           - { platform: s390x, arch: s390x, bootlin: s390x-z13, naive: false }
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Download frontend dist
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: frontend-dist
           path: web/html
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           cache: false
           go-version-file: go.mod
+
+      - name: Resolve cronet-go commit
+        if: matrix.naive
+        run: |
+          set -euo pipefail
+          SHORT=$(go list -m -f '{{.Version}}' github.com/sagernet/cronet-go | sed 's/.*-//')
+          FULL=$(curl -fsSL "https://api.github.com/repos/SagerNet/cronet-go/commits/${SHORT}" | jq -r '.sha')
+          [ -n "$FULL" ] && [ "$FULL" != "null" ] || { echo "could not resolve cronet-go commit ${SHORT}" >&2; exit 1; }
+          echo "cronet-go: $FULL"
+          echo "CRONET_COMMIT=$FULL" >> "$GITHUB_ENV"
 
       # Naive platforms: use cronet toolchain only (no Bootlin).
       - name: Clone cronet-go (cronet toolchain for naive)
@@ -92,7 +109,7 @@ jobs:
           set -e
           git init ~/cronet-go
           git -C ~/cronet-go remote add origin ${{ env.CRONET_GO_REPO }}
-          git -C ~/cronet-go fetch --depth=1 origin "${{ env.CRONET_GO_VERSION }}"
+          git -C ~/cronet-go fetch --depth=1 origin "${{ env.CRONET_COMMIT }}"
           git -C ~/cronet-go checkout FETCH_HEAD
           git -C ~/cronet-go submodule update --init --recursive --depth=1
 
@@ -107,14 +124,14 @@ jobs:
       - name: Cache Chromium toolchain
         if: matrix.naive
         id: cache-chromium-toolchain
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
         with:
           path: |
             ~/cronet-go/naiveproxy/src/third_party/llvm-build/
             ~/cronet-go/naiveproxy/src/gn/out/
             ~/cronet-go/naiveproxy/src/chrome/build/pgo_profiles/
             ~/cronet-go/naiveproxy/src/out/sysroot-build/
-          key: chromium-toolchain-${{ matrix.platform }}-musl-${{ env.CRONET_GO_VERSION }}
+          key: chromium-toolchain-${{ matrix.platform }}-musl-${{ env.CRONET_COMMIT }}
 
       - name: Build cronet lib and set toolchain env (CC, CXX, CGO_LDFLAGS, PATH)
         if: matrix.naive
@@ -164,12 +181,29 @@ jobs:
             echo "CGO_LDFLAGS=--sysroot=$SYSROOT -static" >> $GITHUB_ENV
           fi
 
+      - name: Download Go modules (with retry)
+        run: |
+          set -e
+          export GODEBUG=http2client=0
+          for i in 1 2 3 4 5; do
+            if go mod download -x; then
+              echo "go mod download succeeded"
+              exit 0
+            fi
+            echo "go mod download failed (attempt $i), retrying in $((i * 10))s..."
+            sleep $((i * 10))
+          done
+          echo "go mod download failed after 5 attempts" >&2
+          exit 1
+
       - name: Build s-ui
         run: |
           set -e
-          BUILD_TAGS="with_quic,with_grpc,with_utls,with_acme,with_gvisor,badlinkname,tfogo_checklinkname0,with_tailscale"
-          [ "${{ matrix.naive }}" = "true" ] && BUILD_TAGS="${BUILD_TAGS},with_naive_outbound,with_musl"
-          go build -ldflags="-w -s -checklinkname=0 -linkmode external -extldflags '-static'" -tags "$BUILD_TAGS" -o sui main.go
+          . ./build-tags.sh
+          if [ "${{ matrix.naive }}" = "true" ]; then PROFILE=release; else PROFILE=test; fi
+          TAGS=$(tags_for "$PROFILE")
+          LDFLAGS=$(ldflags_for "$PROFILE")
+          go build -ldflags="$LDFLAGS -linkmode external -extldflags '-static'" -tags "$TAGS" -o sui main.go
           file sui
           ldd sui 2>/dev/null || echo "Static binary confirmed"
 
@@ -182,21 +216,128 @@ jobs:
         run: tar -zcvf s-ui-linux-${{ matrix.platform }}.tar.gz s-ui
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: s-ui-linux-${{ matrix.platform }}
           path: ./s-ui-linux-${{ matrix.platform }}.tar.gz
           retention-days: 30
 
+  build-windows:
+    needs: build-frontend
+    if: ${{ always() && needs.build-frontend.result == 'success' }}
+    name: build-windows-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: amd64, runner: windows-latest, cgo: "1" }
+          - { arch: arm64, runner: ubuntu-latest, cgo: "0" }
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: frontend-dist
+          path: web/html
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          cache: false
+          go-version-file: go.mod
+
+      - name: Install zip for Windows
+        if: matrix.arch == 'amd64'
+        shell: powershell
+        run: |
+          # Install Chocolatey if not available
+          if (!(Get-Command choco -ErrorAction SilentlyContinue)) {
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+          }
+          # Install zip
+          choco install zip -y
+
+      - name: Build s-ui
+        shell: bash
+        run: |
+          export CGO_ENABLED=${{ matrix.cgo }}
+          export GOOS=windows
+          export GOARCH=${{ matrix.arch }}
+          
+          echo "Building for Windows ${{ matrix.arch }}"
+          go version
+          go env GOOS GOARCH
+          
+          . ./build-tags.sh
+          TAGS=$(tags_for windows)
+          LDFLAGS=$(ldflags_for windows)
+          go build -ldflags="$LDFLAGS" -tags "$TAGS" -o sui.exe main.go
+          file sui.exe
+          
+          mkdir s-ui-windows
+          cp sui.exe s-ui-windows/
+          cp -r windows/* s-ui-windows/
+
+      - name: Download libcronet-go
+        shell: bash
+        run: |
+          curl -qsL -o s-ui-windows/libcronet.dll ${{ env.LIBCRONET_BASE_URL }}/libcronet-windows-${{ matrix.arch }}.dll
+
+      - name: Package
+        shell: bash
+        run: |
+          zip -r "s-ui-windows-${{ matrix.arch }}.zip" s-ui-windows
+
+      - name: Upload files to Artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: s-ui-windows-${{ matrix.arch }}
+          path: ./s-ui-windows-${{ matrix.arch }}.zip
+          retention-days: 30
+
+  # One place that touches the release, reached only once every build has
+  # succeeded. Publishing from each matrix leg left a half-populated release
+  # behind whenever one platform failed, and the two copies of this step had
+  # drifted to different tag expressions.
+  publish:
+    needs: [build-linux, build-windows]
+    if: |
+      always() &&
+      needs.build-linux.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      ((github.event_name == 'release' && github.event.action == 'published') ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: s-ui-*
+          merge-multiple: true
+          path: dist
+
+      # install.sh verifies this before extracting, so a release without it
+      # silently falls back to an unauthenticated install.
+      - name: Generate SHA256SUMS
+        run: |
+          set -e
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Upload to Release
-        uses: svenstaro/upload-release-action@v2
-        if: |
-          (github.event_name == 'release' && github.event.action == 'published') ||
-          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/'))
+        uses: svenstaro/upload-release-action@29e53e917877a24fad85510ded594ab3c9ca12de # v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref_name }}
-          file: s-ui-linux-${{ matrix.platform }}.tar.gz
-          asset_name: s-ui-linux-${{ matrix.platform }}.tar.gz
+          file: dist/*
+          file_glob: true
           prerelease: true
           overwrite: true

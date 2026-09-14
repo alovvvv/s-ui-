@@ -41,32 +41,56 @@ var defaultConfig = `{
   "experimental": {}
 }`
 
+// protectedSettings never travel over the settings endpoint, in either
+// direction. They were already stripped from GetAllSetting, but Save accepted
+// whatever keys it was posted: a client could set its own session `secret`,
+// logging every other session out, or replace the whole sing-box base `config`
+// through a form that is not supposed to touch it.
+//
+// maintenance is here for a different reason -- it has an action of its own
+// that stops or starts the core alongside writing the flag, and letting it
+// through here would leave the two disagreeing.
+var protectedSettings = map[string]bool{
+	"secret":          true,
+	"config":          true,
+	"version":         true,
+	"globalResetLast": true,
+	"maintenance":     true,
+}
+
 var defaultValueMap = map[string]string{
-	"webListen":     "",
-	"webDomain":     "",
-	"webPort":       "2095",
-	"secret":        common.Random(32),
-	"webCertFile":   "",
-	"webKeyFile":    "",
-	"webPath":       "/app/",
-	"webURI":        "",
-	"sessionMaxAge": "0",
-	"trafficAge":    "30",
-	"timeLocation":  "Asia/Tehran",
-	"subListen":     "",
-	"subPort":       "2096",
-	"subPath":       "/sub/",
-	"subDomain":     "",
-	"subCertFile":   "",
-	"subKeyFile":    "",
-	"subUpdates":    "12",
-	"subEncode":     "true",
-	"subShowInfo":   "false",
-	"subURI":        "",
-	"subJsonExt":    "",
-	"subClashExt":   "",
-	"config":        defaultConfig,
-	"version":       config.GetVersion(),
+	"webListen":          "",
+	"webDomain":          "",
+	"webPort":            "2095",
+	"secret":             common.Random(32),
+	"webCertFile":        "",
+	"webKeyFile":         "",
+	"webPath":            "/app/",
+	"webURI":             "",
+	"sessionMaxAge":      "0",
+	"trafficAge":         "30",
+	"statsBucketSeconds": "60",
+	"timeLocation":       "Asia/Tehran",
+	"subListen":          "",
+	"subPort":            "2096",
+	"subPath":            "/sub/",
+	"subDomain":          "",
+	"subCertFile":        "",
+	"subKeyFile":         "",
+	"subUpdates":         "12",
+	"subEncode":          "true",
+	"subShowInfo":        "false",
+	"subURI":             "",
+	"subJsonExt":         "",
+	"subClashExt":        "",
+	"subClashNoDefGrp":   "false",
+	"subClashSprtAll":    "false",
+	"subClashUdp":        "false",
+	"maintenance":        "false",
+	"globalReset":        "",
+	"globalResetLast":    "0",
+	"config":             defaultConfig,
+	"version":            config.GetVersion(),
 }
 
 type SettingService struct {
@@ -95,17 +119,36 @@ func (s *SettingService) GetAllSetting() (*map[string]string, error) {
 		}
 	}
 
-	// Due to security principles
-	delete(allSetting, "secret")
-	delete(allSetting, "config")
-	delete(allSetting, "version")
+	// Bookkeeping rows share this table with the operator's settings: the
+	// migrated* flags the one-off data migrations write, and whatever a later
+	// migration adds. They used to be handed to the settings form, which posts
+	// back every key it was given, and Save rejects a key that is not a
+	// setting -- so a single migration flag made every settings save fail with
+	// "unknown setting". Only keys the operator can actually set leave here.
+	for key := range allSetting {
+		if _, known := defaultValueMap[key]; !known {
+			delete(allSetting, key)
+		}
+	}
+
+	for key := range protectedSettings {
+		delete(allSetting, key)
+	}
 
 	return &allSetting, nil
 }
 
+// ResetSettings restores the operator-facing settings to their defaults, and
+// deliberately keeps the bookkeeping rows: without the version row the database
+// reads as pre-1.2 and every `s-ui migrate` replays the whole legacy chain,
+// and without the migrated* flags the one-off data migrations all run again.
+//
+// These are not settings the operator set, so resetting them is not what the
+// command means in the first place.
 func (s *SettingService) ResetSettings() error {
 	db := database.GetDB()
-	return db.Where("1 = 1").Delete(model.Setting{}).Error
+	return db.Where("key <> ? AND key NOT LIKE ?", "version", "migrated%").
+		Delete(model.Setting{}).Error
 }
 
 func (s *SettingService) getSetting(key string) (*model.Setting, error) {
@@ -242,6 +285,22 @@ func (s *SettingService) GetTrafficAge() (int, error) {
 	return s.getInt("trafficAge")
 }
 
+// GetStatsBucketSeconds returns the bucket size (in seconds) that traffic
+// samples are rounded down to before being stored. Larger buckets mean fewer
+// rows at the cost of chart resolution. Falls back to the default on a missing
+// or non-positive value.
+func (s *SettingService) GetStatsBucketSeconds() (int64, error) {
+	v, err := s.getInt("statsBucketSeconds")
+	if err != nil {
+		return 0, err
+	}
+	if v < 1 {
+		def, _ := strconv.Atoi(defaultValueMap["statsBucketSeconds"])
+		return int64(def), nil
+	}
+	return int64(v), nil
+}
+
 func (s *SettingService) GetTimeLocation() (*time.Location, error) {
 	l, err := s.getString("timeLocation")
 	if err != nil {
@@ -323,6 +382,25 @@ func (s *SettingService) GetSubURI() (string, error) {
 	return s.getString("subURI")
 }
 
+// GetGlobalReset returns the configured period for resetting all clients'
+// traffic: "off", "weekly", "monthly" or "yearly".
+func (s *SettingService) GetGlobalReset() (string, error) {
+	return s.getString("globalReset")
+}
+
+// GetGlobalResetLast returns the unix time of the last global traffic reset.
+func (s *SettingService) GetGlobalResetLast() (int64, error) {
+	str, err := s.getString("globalResetLast")
+	if err != nil {
+		return 0, err
+	}
+	return strconv.ParseInt(str, 10, 64)
+}
+
+func (s *SettingService) SetGlobalResetLast(value int64) error {
+	return s.setString("globalResetLast", strconv.FormatInt(value, 10))
+}
+
 func (s *SettingService) GetFinalSubURI(host string) (string, error) {
 	allSetting, err := s.GetAllSetting()
 	if err != nil {
@@ -362,6 +440,10 @@ func (s *SettingService) SaveConfig(tx *gorm.DB, config json.RawMessage) error {
 	return tx.Model(model.Setting{}).Where("key = ?", "config").Update("value", string(configs)).Error
 }
 
+func normalizeSettingValue(value string) string {
+	return strings.TrimSpace(value)
+}
+
 func (s *SettingService) Save(tx *gorm.DB, data json.RawMessage) error {
 	var err error
 	var settings map[string]string
@@ -370,6 +452,20 @@ func (s *SettingService) Save(tx *gorm.DB, data json.RawMessage) error {
 		return err
 	}
 	for key, obj := range settings {
+		if protectedSettings[key] {
+			continue
+		}
+		// An unknown key would UPDATE zero rows and report success. Rejecting
+		// it instead surfaces a typo in the caller rather than silently
+		// dropping the value.
+		if _, known := defaultValueMap[key]; !known {
+			return common.NewError("unknown setting: ", key)
+		}
+
+		// Ignore accidental surrounding whitespace while preserving spaces
+		// inside values such as certificate paths and URLs.
+		obj = normalizeSettingValue(obj)
+
 		// Secure file existence check
 		if obj != "" && (key == "webCertFile" ||
 			key == "webKeyFile" ||
@@ -399,12 +495,21 @@ func (s *SettingService) Save(tx *gorm.DB, data json.RawMessage) error {
 				return err
 			}
 		}
-		err = tx.Model(model.Setting{}).Where("key = ?", key).Update("value", obj).Error
-		if err != nil {
-			return err
+		// Upsert. A plain UPDATE affects zero rows and reports success when the
+		// row does not exist yet, and rows are only created lazily the first
+		// time GetAllSetting runs -- so on a fresh install the settings form
+		// could report a successful save that wrote nothing.
+		res := tx.Model(model.Setting{}).Where("key = ?", key).Update("value", obj)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			if err := tx.Create(&model.Setting{Key: key, Value: obj}).Error; err != nil {
+				return err
+			}
 		}
 	}
-	return err
+	return nil
 }
 
 func (s *SettingService) GetSubJsonExt() (string, error) {
@@ -413,6 +518,38 @@ func (s *SettingService) GetSubJsonExt() (string, error) {
 
 func (s *SettingService) GetSubClashExt() (string, error) {
 	return s.getString("subClashExt")
+}
+
+// GetSubClashNoDefGrp reports whether the default "Proxy"/"Auto" proxy-groups
+// should never be injected into a Clash subscription. When true, the config is
+// left with exactly the groups the user defined.
+func (s *SettingService) GetSubClashNoDefGrp() (bool, error) {
+	return s.getBool("subClashNoDefGrp")
+}
+
+// GetSubClashSprtAll reports whether a case-insensitive "all" entry inside a
+// custom proxy-group's "proxies" list should be expanded into every generated
+// proxy tag.
+func (s *SettingService) GetSubClashSprtAll() (bool, error) {
+	return s.getBool("subClashSprtAll")
+}
+
+// GetSubClashUdp reports whether generated Clash proxies should carry
+// "udp: true" by default. Mihomo disables UDP unless the proxy opts in, so
+// without it VLESS/VMess/Trojan/... nodes reach the client with UDP off.
+func (s *SettingService) GetSubClashUdp() (bool, error) {
+	return s.getBool("subClashUdp")
+}
+
+// GetMaintenance reports whether the operator has taken the core out of
+// service. It is stored rather than held in memory so a reboot in the middle of
+// maintenance does not quietly put users back online.
+func (s *SettingService) GetMaintenance() (bool, error) {
+	return s.getBool("maintenance")
+}
+
+func (s *SettingService) SetMaintenance(enabled bool) error {
+	return s.setString("maintenance", strconv.FormatBool(enabled))
 }
 
 func (s *SettingService) fileExists(path string) error {

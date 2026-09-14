@@ -47,7 +47,7 @@ func (o *EndpointService) GetAll() (*[]map[string]interface{}, error) {
 func (o *EndpointService) GetAllConfig(db *gorm.DB) ([]json.RawMessage, error) {
 	var endpointsJson []json.RawMessage
 	var endpoints []*model.Endpoint
-	err := db.Model(model.Endpoint{}).Scan(&endpoints).Error
+	err := db.Model(model.Endpoint{}).Find(&endpoints).Error
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,6 @@ func (s *EndpointService) Save(tx *gorm.DB, act string, data json.RawMessage) er
 		if err != nil {
 			return err
 		}
-
 		if endpoint.Type == "warp" {
 			if act == "new" {
 				err = s.WarpService.RegisterWarp(&endpoint)

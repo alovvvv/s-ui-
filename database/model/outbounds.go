@@ -49,5 +49,14 @@ func (o Outbound) MarshalJSON() ([]byte, error) {
 		}
 	}
 
+	if tlsRaw, ok := combined["tls"].(json.RawMessage); ok {
+		var tlsObj map[string]interface{}
+		if json.Unmarshal(tlsRaw, &tlsObj) == nil {
+			if enabled, _ := tlsObj["enabled"].(bool); !enabled {
+				delete(combined, "tls")
+			}
+		}
+	}
+
 	return json.Marshal(combined)
 }
